@@ -1,0 +1,72 @@
+#!/bin/bash -e
+
+## etcd-backup creates and validates a backup snapshot of a single
+## specific etcd database associated with a Kubernetes cluster and
+## optionally removes any backups older than the limit_days_to_keep.
+## Note that this is only a portion of a full disaster recovery
+## strategy depending on the type of applications running in the
+## cluster.
+
+# change the following to match your cluster
+
+cacert=/etc/kubernetes/pki/etcd/ca.crt
+cert=/etc/kubernetes/pki/etcd/server.crt
+key=/etc/kubernetes/pki/etcd/server.key
+port=2379
+hosts=(control1)
+limit_days_to_keep=7
+
+dirs=(
+  "/remote/backup/foo/$HOSTNAME/etcd"
+  "/var/backup/k8s/etcd"
+)
+
+# ------------------ limit changes to anything below -----------------
+
+export ETCDCTL_API=3
+tstamp=$(date -u +%Y%m%dT%H%M%SZ)
+
+endpoints=$(printf "https://%s:$port," "${hosts[@]}")
+endpoints=${endpoints%,}
+
+leader=$(etcdctl \
+  --endpoints="$endpoints" \
+  --cacert="$cacert" \
+  --cert="$cert" \
+  --key="$key" \
+  endpoint status | grep true)
+leader=${leader%%,*}
+
+snapshot () {
+  local dir=$1
+  test -d "$dir" || mkdir -p "$dir"
+  etcdctl \
+    --endpoints="$leader" \
+    --cacert="$cacert" \
+    --cert="$cert" \
+    --key="$key" \
+    snapshot save "$dir/etcd-backup-$tstamp.db"
+}
+
+before () {
+  local limit=$1
+  local fmt=$2
+  [[ -n "$limit" && "$fmt" =~ \* ]]
+  local dir=${fmt%/*}
+  local name=${fmt##*/}
+  local path=${fmt//\*/$limit}
+  while IFS= read -r line; do
+    [[ "$line" < "$path" ]] && echo "$line"
+  done < <(find "$dir" -maxdepth 1 -type f -name "$name")
+}
+
+for d in "${dirs[@]}"; do
+  snapshot "$d"
+  (( "$limit_days_to_keep" > 0 )) || continue
+  limit=$(date -d "-$limit_days_to_keep days" -u +%Y%m%dT%H%M%SZ)
+  while IFS= read -r file; do
+    echo "Deleting: $file"
+    rm "$file"
+  done < <(before "$limit" "$d/etcd-backup-*.db")
+done
+
