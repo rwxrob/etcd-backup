@@ -2,21 +2,21 @@
 
 ## etcd-backup creates and validates a backup snapshot of a single
 ## specific etcd database associated with a Kubernetes cluster and
-## optionally removes any backups older than the limit_days_to_keep.
+## optionally removes any backups older than the LIMIT_DAYS_TO_KEEP.
 ## Note that this is only a portion of a full disaster recovery
 ## strategy depending on the type of applications running in the
 ## cluster.
 
 # change the following to match your cluster
 
-cacert=/etc/kubernetes/pki/etcd/ca.crt
-cert=/etc/kubernetes/pki/etcd/server.crt
-key=/etc/kubernetes/pki/etcd/server.key
-port=2379
-hosts=(control1)
-limit_days_to_keep=7
+CACERT=/etc/kubernetes/pki/etcd/ca.crt
+CERT=/etc/kubernetes/pki/etcd/server.crt
+KEY=/etc/kubernetes/pki/etcd/server.key
+PORT=2379
+HOSTS=(control1)
+LIMIT_DAYS_TO_KEEP=7
 
-dirs=(
+DIRS=(
   "/remote/backup/foo/$HOSTNAME/etcd"
   "/var/backup/k8s/etcd"
 )
@@ -24,16 +24,16 @@ dirs=(
 # ------------------ limit changes to anything below -----------------
 
 export ETCDCTL_API=3
-tstamp=$(date -u +%Y%m%dT%H%M%SZ)
+TSTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 
-endpoints=$(printf "https://%s:$port," "${hosts[@]}")
-endpoints=${endpoints%,}
+ENDPOINTS=$(printf "https://%s:$PORT," "${HOSTS[@]}")
+ENDPOINTS=${ENDPOINTS%,}
 
 leader=$(etcdctl \
-  --endpoints="$endpoints" \
-  --cacert="$cacert" \
-  --cert="$cert" \
-  --key="$key" \
+  --endpoints="$ENDPOINTS" \
+  --cacert="$CACERT" \
+  --cert="$CERT" \
+  --key="$KEY" \
   endpoint status | grep true)
 leader=${leader%%,*}
 
@@ -42,10 +42,23 @@ snapshot () {
   test -d "$dir" || mkdir -p "$dir"
   etcdctl \
     --endpoints="$leader" \
-    --cacert="$cacert" \
-    --cert="$cert" \
-    --key="$key" \
-    snapshot save "$dir/etcd-backup-$tstamp.db"
+    --cacert="$CACERT" \
+    --cert="$CERT" \
+    --key="$KEY" \
+    snapshot save "$dir/etcd-backup-$TSTAMP.db" >&2
+}
+
+validate () {
+:
+#   local dir=$1
+#   test -d "$dir" || mkdir -p "$dir"
+#   etcdctl \
+#     --endpoints="$leader" \
+#     --cacert="$CACERT" \
+#     --cert="$CERT" \
+#     --key="$KEY" \
+#     snapshot save "$dir/etcd-backup-$TSTAMP.db"
+
 }
 
 before () {
@@ -60,12 +73,12 @@ before () {
   done < <(find "$dir" -maxdepth 1 -type f -name "$name")
 }
 
-for d in "${dirs[@]}"; do
+for d in "${DIRS[@]}"; do
   snapshot "$d"
-  (( "$limit_days_to_keep" > 0 )) || continue
-  limit=$(date -d "-$limit_days_to_keep days" -u +%Y%m%dT%H%M%SZ)
+  (( "$LIMIT_DAYS_TO_KEEP" > 0 )) || continue
+  limit=$(date -d "-$LIMIT_DAYS_TO_KEEP days" -u +%Y%m%dT%H%M%SZ)
   while IFS= read -r file; do
-    echo "Deleting: $file"
+    echo "Deleting: $file" >&2
     rm "$file"
   done < <(before "$limit" "$d/etcd-backup-*.db")
 done
