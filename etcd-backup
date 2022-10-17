@@ -1,11 +1,24 @@
 #!/bin/bash
 
+## usage: etcd-backup DIR
+##
 ## etcd-backup creates and validates a backup snapshot of a single
 ## specific etcd database associated with a Kubernetes cluster and
-## optionally removes any backups older than the LIMIT_DAYS_TO_KEEP.
-## Note that this is only a portion of a full disaster recovery
-## strategy depending on the type of applications running in the
-## cluster.
+## saves it into the specified DIR with the file name
+## etcd-backup-TSTAMP.db where TSTAMP is replaced with an ISO8601
+## time stamp in UTC such that files will properly sort lexically
+## within the directory. The script also optionally removes any
+## backups older than the LIMIT_DAYS_TO_KEEP (0 for none). The
+## script can be called from cron or from Icinga2.
+##
+## Note that this script is only a portion of a full disaster
+## recovery strategy depending on the type of applications running
+## in the cluster.
+##
+## Consider calling this script redundantly for the same etcd
+## instance more than once for different target filesystems to
+## limit risk associated with filesystem failure, particularly
+## when storing to NAS mounts.
 
 # change the following to match your cluster
 
@@ -16,12 +29,10 @@ PORT=2379
 HOSTS=(control1 control2 control3)
 LIMIT_DAYS_TO_KEEP=7
 
-DIRS=(
-  "/remote/backup/foo/$HOSTNAME/etcd"
-  "/var/backup/k8s/etcd"
-)
-
 # ------------------ limit changes to anything below -----------------
+
+DIR=$1
+test -z "$DIR" && echo "usage: $0 DIR" && exit 1
 
 export ETCDCTL_API=3
 TSTAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -37,27 +48,6 @@ leader=$(etcdctl \
   endpoint status | grep true)
 leader=${leader%%,*}
 
-snapshot () {
-  local dir=$1
-  test -d "$dir" || mkdir -p "$dir"
-  etcdctl \
-    --endpoints="$leader" \
-    --cacert="$CACERT" \
-    --cert="$CERT" \
-    --key="$KEY" \
-    snapshot save "$dir/etcd-backup-$TSTAMP.db" >&2
-}
-
-validate () {
-  local dir=$1
-  test -z "$dir" && return 1
-  etcdctl \
-    --cacert="$CACERT" \
-    --cert="$CERT" \
-    --key="$KEY" \
-    snapshot status "$dir/etcd-backup-$TSTAMP.db" >&2
-}
-
 before () {
   local limit=$1
   local fmt=$2
@@ -70,36 +60,48 @@ before () {
   done < <(find "$dir" -maxdepth 1 -type f -name "$name")
 }
 
-declare -i snapshot_fails=0
-declare -i validate_fails=0
-declare -i rotate_fails=0
+snapshot () {
+  local dir=$1
+  test -z "$dir" && return 2
+  test -d "$dir" || mkdir -p "$dir"
+  etcdctl \
+    --endpoints="$leader" \
+    --cacert="$CACERT" \
+    --cert="$CERT" \
+    --key="$KEY" \
+    snapshot save "$dir/etcd-backup-$TSTAMP.db" >&2
+}
 
-for d in "${DIRS[@]}"; do
-  snapshot "$d" || ((snapshot_fails++))
-  validate "$d" || ((validate_fails++))
-  (( "$LIMIT_DAYS_TO_KEEP" > 0 )) || continue
+validate () {
+  local dir=$1
+  test -d "$dir" || return 2
+  etcdctl \
+    --cacert="$CACERT" \
+    --cert="$CERT" \
+    --key="$KEY" \
+    snapshot status "$dir/etcd-backup-$TSTAMP.db" >&2
+}
+
+rotate () {
+  local dir=$1
+  test -d "$dir" || return 1
+  (( "$LIMIT_DAYS_TO_KEEP" > 0 )) || return 0
   limit=$(date -d "-$LIMIT_DAYS_TO_KEEP days" -u +%Y%m%dT%H%M%SZ)
   while IFS= read -r file; do
     echo "Deleting: $file" >&2
-    rm "$file" || ((rotate_fails++))
-  done < <(before "$limit" "$d/etcd-backup-*.db")
-done
+    rm "$file" || return 1
+  done < <(before "$limit" "$dir/etcd-backup-*.db")
+}
 
-# originally intended for Icinga status
+fail() {
+  local code=$1
+  local message=$2
+  echo "$message" >&2
+  exit "$code"
+}
 
-if (( rotate_fails > 0 )); then
-  echo "WARNING"
-  exit 1
-fi
-
-if (( snapshot_fails > 0 )); then
-  echo "CRITICAL"
-  exit 2
-fi
-
-if (( validate_fails > 0 )); then
-  echo "CRITICAL"
-  exit 2
-fi
+snapshot "$DIR" || fail 2 "CRITICAL"
+validate "$DIR" || fail 2 "CRITICAL"
+rotate "$DIR" || fail 1 "WARNING"
 
 echo "OK"
